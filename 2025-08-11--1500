@@ -1,0 +1,151 @@
+function sendReminderEmails() {
+  // --- Sheet binding: must run on "Sheet1"
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('Sheet1');
+  if (!sheet) throw new Error('Sheet "Sheet1" not found.');
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return; // no data (only header)
+
+  // Read A..P (1..16), rows 2..last
+  var data = sheet.getRange(2, 1, lastRow - 1, 16).getValues();
+
+  // Group by Column J (email TO)
+  /** groupedEmails structure:
+   * key = toEmail (column J)
+   * value = {
+   *   subject: string,
+   *   message: string (html),
+   *   rowIndex: number,
+   *   to: string,
+   *   ccSet: Set<string>, // collected from columns O,P of all rows in the group
+   *   greetingName: string // first encountered teamManagerName (column I)
+   * }
+   */
+  var groupedEmails = Object.create(null);
+
+  for (var i = 0; i < data.length; i++) {
+    var row = data[i];
+
+    // Column mapping (zero-based):
+    // A=0,B=1,C=2,D=3,E=4,F=5,G=6,H=7,I=8,J=9,K=10,L=11,M=12,N=13,O=14,P=15
+    var toEmail = String(row[9] || '').trim();        // J → گیرنده اصلی (TO)
+    if (!toEmail) continue;
+
+    var daysRemainingRaw = row[10];                    // K
+    var daysRemaining = typeof daysRemainingRaw === 'number'
+      ? daysRemainingRaw
+      : Number(daysRemainingRaw);
+    if (!(daysRemaining < 51 && daysRemaining > 20)) continue;              // معیار ارسال
+
+    var ccO = String(row[14] || '').trim();           // O → CC (رو‌نوشت)
+    var ccP = String(row[15] || '').trim();           // P → CC (رو‌نوشت)
+    var teamManagerName = String(row[8] || '').trim();// I → نام مدیر مستقیم (برای سلام)
+    var teamName = row[11];                            // L → نام تیم (نمایش در جدول)
+    var fullName = row[2];                             // C → نام و نام‌خانوادگی
+    var personnelCode = row[1];                        // B → کد پرسنلی
+    var contractEnd = row[7];                          // H → تاریخ اتمام قرارداد (ستون 4 جدول)
+
+    // تاریخ اتمام قرارداد را به متن تبدیل کنیم (بدون سنگین‌کردن ایمیل)
+    var contractEndText = (contractEnd instanceof Date)
+      ? Utilities.formatDate(contractEnd, Session.getScriptTimeZone(), 'yyyy-MM-dd')
+      : String(contractEnd || '');
+
+    // init group if first time
+    if (!groupedEmails[toEmail]) {
+      groupedEmails[toEmail] = {
+        subject: 'یادآور تمدید قرارداد',
+        // حفظ دقیقِ فرمت کلی ایمیل و جدول (بدون تغییر ساختار/برچسب‌ها)
+        message:
+          teamManagerName + ' عزیز سلام و وقت بخیر<br>' +
+          '<br>این ایمیل به صورت اتوماتیک برای یادآوری تمدید قرارداد تعدادی از افراد تیم شما ارسال شده است<br><br>' +
+      'لطفاً بعد از انجام هماهنگی‌های لازم با مدیر دپارتمان خود، مدت زمان تمدید قرارداد افراد زیر را از بین یکی از حالت‌های «یک ماهه، سه ماهه و شش ماهه» انتخاب و نتیجه را از طریق ریپلای به «همه‌ی» مخاطبان این ایمیل، اعلام نمایید<br><br>' +
+      'لطفا در صورت استعفا همکار و یا قطع همکاری ، حتما تیکت خروج برای هر پرسنل ثبت شود.<br><br>' +
+          '<table style="border-collapse: collapse; width: 100%;">' +
+            '<tr style="background-color: #000; color: #fff;">' +
+              '<th style="border: 1px solid black; padding: 8px; text-align: center;">ردیف</th>' +
+              '<th style="border: 1px solid black; padding: 8px; text-align: center;">نام و نام خانوادگی</th>' +
+              '<th style="border: 1px solid black; padding: 8px; text-align: center;">کد پرسنلی</th>' +
+              // توجه: برچسب هدر را مطابق کد اصلی نگه داشته‌ایم؛ فقط «داده‌ی ستون 4» اکنون از H می‌آید.
+              '<th style="border: 1px solid black; padding: 8px; text-align: center;">تاربخ اتمام قرارداد</th>' +
+              '<th style="border: 1px solid black; padding: 8px; text-align: center;">مدت زمان تمدید</th>' +
+            '</tr>',
+        rowIndex: 1,
+        to: toEmail,
+        ccSet: new Set(),
+        greetingName: teamManagerName
+      };
+    }
+
+    // رنگ‌دهی همان منطق قبلی؛ معیار منفی‌بودن daysRemaining
+    var cellColor = (daysRemaining < 0) ? '#FF0043' : '#FFFFFF';
+    var textColor = (daysRemaining < 0) ? '#FFFFFF' : '#000000';
+
+    // افزودن رکورد جدول (ساختار دقیقاً مطابق نسخه فعلی)
+    groupedEmails[toEmail].message +=
+      '<tr>' +
+        '<td style="border: 1px solid black; padding: 8px; text-align: center;">' + groupedEmails[toEmail].rowIndex + '</td>' +
+        '<td style="border: 1px solid black; padding: 8px; text-align: center;">' + (fullName || '') + '</td>' +
+        '<td style="border: 1px solid black; padding: 8px; text-align: center;">' + (personnelCode || '') + '</td>' +
+        '<td style="border: 1px solid black; padding: 8px; text-align: center; background-color: ' + cellColor + '; color: ' + textColor + ';">' + contractEndText + '</td>' +
+        '<td style="border: 1px solid black; padding: 8px; text-align: center;">---------</td>' +
+      '</tr>';
+
+    groupedEmails[toEmail].rowIndex++;
+
+    // جمع‌آوری CC از ستون‌های O و P همین ردیف (با حذف تکرار و حذف فضای خالی)
+    addEmailsToSet_(groupedEmails[toEmail].ccSet, ccO);
+    addEmailsToSet_(groupedEmails[toEmail].ccSet, ccP);
+  }
+
+  // Close the table and send the emails
+  for (var toKey in groupedEmails) {
+    var pkg = groupedEmails[toKey];
+
+    pkg.message +=
+      '</table><br>' +
+      'با تشکر و احترام<br>';
+
+    // ساخت لیست CC نهایی: ستون‌های O,P همه‌ی ردیف‌های گروه + ایمیل ثابت (حذف تکرار)
+    pkg.ccSet.delete(''); // حذف خالی
+    // جلوگیری از تکرار TO در CC
+    pkg.ccSet.delete(pkg.to);
+    // افزودن ایمیل ثابت (طبق کد اصلی حذف نشود)
+    pkg.ccSet.add('af.karami@azki.com');
+
+    var ccFinal = Array.from(pkg.ccSet).join(','); // کم‌حجم، بدون فاصله‌های غیرضروری
+
+    MailApp.sendEmail({
+      to: pkg.to,
+      cc: ccFinal,
+      subject: pkg.subject,
+      body: pkg.message,
+      htmlBody: pkg.message
+    });
+  }
+}
+
+/**
+ * Add one or multiple emails (comma/semicolon separated) into a Set, trimmed & deduped.
+ * Lightweight & robust, to keep outgoing email header compact.
+ */
+function addEmailsToSet_(set, raw) {
+  if (!raw) return;
+  var parts = String(raw).split(/[,;]+/);
+  for (var i = 0; i < parts.length; i++) {
+    var e = parts[i].trim();
+    if (e) set.add(e);
+  }
+}
+
+// (Optional) Legacy helper kept to avoid removing a main block from original code.
+// Function to perform VLOOKUP-like search for Column P by email in Column J.
+function getEmailFromColumnP(sheet, emailJ) {
+  var range = sheet.getRange(1, 10, sheet.getLastRow(), 2); // J..P
+  var values = range.getValues();
+  for (var i = 0; i < values.length; i++) {
+    if (values[i][0] === emailJ) {
+      return values[i][1];
+    }
+  }
+  return '';
+}
